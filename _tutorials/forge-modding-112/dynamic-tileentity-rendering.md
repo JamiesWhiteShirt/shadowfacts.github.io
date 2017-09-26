@@ -72,23 +72,32 @@ The `onContentsChanged` method is called by Forge's `ItemStackHandler` every tim
 
 This code updates the `lastChangeTime` field with the current world time and sends a `PacketUpdatePedestal` (which we'll create in the next section) to every player within 64 meters of our block's position.
 
-Nextly, we'll override the `onLoad` method. This method will (on the client side) send a packet to the server requesting an update, which will inform the client of what's stored in the pedestal and the last time it was modified. We specifically request a packet when a client loads the TE because the TE is only saved on the server, and the client isn't aware of what data is stored in it, so we specifically request an update from the server.
+Nextly, we need to ensure the contents of the pedestal are known to clients. This is done by overriding some methods in the tile entity.
+1. `getUpdateTag` returns NBT that is sent when a client receives chunk data from the server. We need to override this so that the client will know what is stored in the pedestal and the last time it was modified.
+2. `getUpdatePacket` optionally returns a packet that is sent when a pedestal block changes. We need to override this so that the value of `getUpdateTag` is sent when the block changes.
+3. `onDataPacket` is called when the tile entity receives a packet made by `getUpdatePacket`. We need to override this so that the tile entity reads the the NBT from the packet.
 
 {% highlight java linenos %}
 // ...
 public class TileEntityPedestal extends TileEntity {
 ​	// ...
 	@Override
-	public void onLoad() {
-		if (world.isRemote) {
-			TutorialMod.network.sendToServer(new PacketRequestUpdatePedestal(this));
-		}
+	public NBTTagCompound getUpdateTag() {
+		return writeToNBT(new NBTTagCompound());
+	}
+
+	@Override
+	public SPacketUpdateTileEntity getUpdatePacket() {
+		return new SPacketUpdateTileEntity(pos, 0, getUpdateTag());
+	}
+
+	@Override
+	public void onDataPacket(NetworkManager net, SPacketUpdateTileEntity pkt) {
+		handleUpdateTag(pkt.getNbtCompound());
 	}
 	// ...
 }
 {% endhighlight %}
-
-The `world.isRemote` check makes sure that the packet is only sent when `onLoad` is being called on the client side and `sendToServer`, as the name suggests, sends the packet to the server. The packet itself, `PacketRequestUpdatePedestal`, will be created in the next section.
 
 Lastly for the tile entity, we'll override the `getRenderBoundingBox` method. This method returns an Axis Aligned Bounding Box (AABB) which is used by Minecraft to check if our tile entity should be rendered. If the AABB is in view on the player, it will be rendered, otherwise it won't. Because of the way our tile entity will render the item (floating above the pedestal base), we need to use a larger box than normal, so that  if the base is out of view but the item isn't, the item is still rendered.
 
@@ -138,7 +147,6 @@ public class TutorialMod {
 	
 		network = NetworkRegistry.INSTANCE.newSimpleChannel(modId);
 		network.registerMessage(new PacketUpdatePedestal.Handler(), PacketUpdatePedestal.class, 0, Side.CLIENT);
-		network.registerMessage(new PacketRequestUpdatePedestal.Handler(), PacketRequestUpdatePedestal.class, 1, Side.SERVER);
 	}
 	
 	// ...
@@ -148,11 +156,11 @@ public class TutorialMod {
 In this code, we:
 
 1. Call `newSimpleChannel` with our mod ID to obtain a `SimpleNetworkWrapper` instance specific to our mod.
-2. Call `registerMessage` on our channel to register our two packets. For each packet, we pass in the `IMessageHandler` instance, the class of the `IMessage` implementation, the ID (unique to our channel) of the packet, and the `Side` on which it's received.
+2. Call `registerMessage` on our channel to register our packet. We pass in the `IMessageHandler` instance, the class of the `IMessage` implementation, the ID (unique to our channel) of the packet, and the `Side` on which it's received.
 
-The two packets we register are: the `PacketUpdatePedestal`, which is sent from the server to the client and updates the item stored in the pedestal on the client side, and the `PacketRequestUpdatedPedestal` , which is sent from the client to the server to request an update from the server. The `PacketUpdatePedestal` is used whenever the item changes on the server to notify the client. The `PacketRequestUpdatePedestal` is sent to the server when the client first joins to get the stored stack (because the data is only saved on the server, not the client).
+The packet we register is `PacketUpdatePedestal`, which is sent from the server to the client and updates the item stored in the pedestal on the client side. The packet is used whenever the item changes on the server to notify the client.
 
-Let's start with the `PacketUpdatePedestal` class. We'll create it in a new `network` package and we'll make it implement Forge's `IMessage` interface.
+We'll create our `PacketUpdatePedestal` in a new `network` package and we'll make it implement Forge's `IMessage` interface.
 
 {% highlight java linenos %}
 package net.shadowfacts.tutorial.network;
@@ -230,6 +238,8 @@ Lastly, we'll add the handler. Let's create a static inner `Handler` class in ou
 
 What we're going to do in the handler's `onMessage` method is get the tile entity from the world and update its inventory and `lastChangeTime`. Unfortunately, there's a caveat to this so it's a bit more complicated. With Netty (the library Minecraft and Forge use for networking), packets are handled on a different thread that's not the main thread. Because we're going to be interacting with and modifying the world, we can't just do it from a different thread because it could potentially cause a `ConcurrentModificationException` to be thrown. To deal with this, we'll call the `Minecraft.addScheduledTask` method which executes the given `Runnable` on the main thread as soon as possible, so in this runnable, we _can_ interact with the world.
 
+Note that `Minecraft.addScheduledTask` will only work on the client. When handling packets on the server, you must obtain a `WorldServer` instance from `ctx.getServerHandler().playerEntity.getServerWorld()` and use `WorldServer.addScheduledTask`.
+
 In the runnable, we simply get the tile entity from the client world (`Minecraft.getMinecraft().world`) and modify its inventory and set its `lastChangeTime` field.
 
 {% highlight java linenos %}
@@ -247,61 +257,6 @@ public class PacketUpdatePedestal implements IMessage {
 				te.lastChangeTime = message.lastChangeTime;
 			});
 			return null;
-		}
-	
-	}
-
-}
-{% endhighlight %}
-
-Lastly for networking, we'll add one more packet: `PacketRequestUpdatePedestal`. This packet is sent from the client to the server when the client loads the tile entity and needs to get its data from the server. This packet will be fairly similar to the previous one, so I won't go over it in as much detail.
-
-This packet has a position and a dimension ID. (This one needs a dimension ID unlike the previous one because this will be received on the server which has multiple worlds, and we need a way to determine which one to use, whereas the previous packet was received on the client which only ever has one world.) These are serialized/deserialized as you'd expect. 
-
-The handler class, however, has a slight difference. Unlike the `PacketUpdatePedestal`, this packet has a response packet. So for the generic types we'll use `PacketRequestUpdatePedestal` and `PacketUpdatePedestal`. In the `onMessage` method, we'll call `FMLCommonHandler.instance().getMinecraftServerInstance()` to obtain the instance of `MinecraftServer`, which stores all the worlds. On that instance we'll call `worldServerForDimension` with the dimension from the packet to obtain the `World` instance. We then get the tile entity and return a new `PacketUpdatePedestal` from it which is sent back to the client.
-
-{% highlight java linenos %}
-// ...
-public class PacketRequestUpdatePedestal implements IMessage {
-
-	private BlockPos pos;
-	private int dimension;
-	
-	public PacketRequestUpdatePedestal(BlockPos pos, int dimension) {
-		this.pos = pos;
-		this.dimension = dimension;
-	}
-	
-	public PacketRequestUpdatePedestal(TileEntityPedestal te) {
-		this(te.getPos(), te.getWorld().provider.getDimension());
-	}
-	
-	public PacketRequestUpdatePedestal() {
-	}
-	
-	@Override
-	public void toBytes(ByteBuf buf) {
-		buf.writeLong(pos.toLong());
-		buf.writeInt(dimension);
-	}
-	
-	@Override
-	public void fromBytes(ByteBuf buf) {
-		pos = BlockPos.fromLong(buf.readLong());
-		dimension = buf.readInt();
-	}
-	
-	public static class Handler implements IMessageHandler<PacketRequestUpdatePedestal, PacketUpdatePedestal> {
-	
-		@Override
-		public PacketUpdatePedestal onMessage(PacketRequestUpdatePedestal message, MessageContext ctx) {
-			World world = FMLCommonHandler.instance().getMinecraftServerInstance().worldServerForDimension(message.dimension);
-			TileEntityPedestal te = (TileEntityPedestal)world.getTileEntity(message.pos);
-			if (te != null) {
-				return new PacketUpdatePedestal(te);
-			} else {
-				return null;
-			}
 		}
 	
 	}
