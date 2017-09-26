@@ -76,10 +76,9 @@ public class BlockPedestal extends BlockTileEntity<TileEntityPedestal> {
 			} else {
 				ItemStack stack = itemHandler.getStackInSlot(0);
 				if (!stack.isEmpty()) {
-					String localized = TutorialMod.proxy.localize(stack.getUnlocalizedName() + ".name");
-					player.addChatMessage(new TextComponentString(stack.getCount() + "x " + localized));
+					player.addChatMessage(new TextComponentTranslation("tile.tutorial.pedestal.content", stack.getCount(), stack.getTextComponent()));
 				} else {
-					player.addChatMessage(new TextComponentString("Empty"));
+					player.addChatMessage(new TextComponentTranslation("tile.tutorial.pedestal.empty"));
 				}
 			}
 		}
@@ -91,44 +90,18 @@ public class BlockPedestal extends BlockTileEntity<TileEntityPedestal> {
 }
 {% endhighlight %}
 
+You will also need the following lines in your `en_us.lang`
+
+{% highlight properties linenos %}
+# ...
+tile.tutorial.pedestal.content=%d x %s
+tile.tutorial.pedestal.empty=Empty
+# ...
+{% endhighlight %}
+
 The `IItemHandler` and capability stuff might look a bit confusing, but that's ok, it will be explained in more detail later on. For now, suffice it to say that the `IItemHandler` is the object that stores the pedestal's inventory.
 
-Before we can continue, we'll also need to add a new method to our proxy class. This method will take an unlocalized name (e.g. `item.diamond.name`) and translate it into the correct version (e.g. `Diamond`). This needs to be a method in our proxy class because there are two different ways of localizing things depending if you're on the client or the server. If you're on the server, you need to use `net.minecraft.util.text.translation.I18n` whereas if you're on the client, you need to use `net.minecraft.client.resources.I18n`. In our `CommonProxy` class, we'll add the server-side version of this:
-
-{% highlight java linenos %}
-// ...
-import net.minecraft.util.text.translation.I18n;
-
-public class CommonProxy {
-
-	// ...
-
-	public String localize(String unlocalized, Object... args) {
-		return I18n.translateToLocalFormatted(unlocalized, args);
-	}
-
-}
-{% endhighlight %}
-
-And in the `ClientProxy`, we'll add the client-side version of this:
-
-{% highlight java linenos %}
-// ...
-import net.minecraft.client.resources.I18n;
-
-public class ClientProxy extends CommonProxy {
-
-	// ...
-
-	@Override
-	public String localize(String unlocalized, Object... args) {
-		return I18n.format(unlocalized, args);
-	}
-
-}
-{% endhighlight %}
-
-Make sure you're importing the right `I18n` in the right proxy class, otherwise you could cause a crash when your mod is running on a server.
+We use `TextComponentTranslation` for chat messages so that the messages are localized on the client. This is necessary so that players will see the messages in their own language should your mod support it. Note the syntax in `%sx %s`. The count replaces the first `%s` and the name of the stack replaces the second `%s`.
 
 The very last thing we'll need to add to our block class is the `breakBlock` method. This method is called when our block is destroyed in the world, and we'll use it to drop the contents of the pedestal's inventory.
 
